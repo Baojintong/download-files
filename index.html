@@ -36,6 +36,8 @@ table{border:1px solid #e2e8f0;border-radius:12px;overflow:hidden}
 .status{font-variant-numeric:tabular-nums;color:#334155}
 .hint{font-size:12px;color:#64748b;margin-top:8px}
 .warn{position:sticky;top:0;background:#fde047;color:#0f172a;border:1px solid #facc15;padding:10px;font-weight:700;display:none;z-index:999;text-align:center;border-radius:10px;box-shadow:0 4px 10px rgba(0,0,0,.08)}
+.req{color:#dc2626;font-size:12px;margin-left:8px;display:none}
+.invalid{border-color:#dc2626;box-shadow:0 0 0 3px rgba(220,38,38,.1)}
 </style>
 </head>
 <body>
@@ -50,7 +52,9 @@ table{border:1px solid #e2e8f0;border-radius:12px;overflow:hidden}
   <div class="card">
     <div class="row">
       <input id="excel-input" type="file" accept=".xlsx,.xls" />
+      <span id="excel-required" class="req">请先选择Excel文件</span>
       <button id="pick-dir" class="btn btn-secondary">选择目标目录</button>
+      <span id="dir-required" class="req">请先选择目标目录</span>
       <label>并发数 <input id="concurrency" type="number" min="1" max="16" value="4"></label>
       <input id="proxy-base" placeholder="代理地址，如 https://your-worker.workers.dev" style="flex:1;height:36px;border:1px solid #cbd5e1;border-radius:8px;padding:0 10px" />
       <button id="start" class="btn btn-primary">开始下载</button>
@@ -106,6 +110,8 @@ const proxyBaseInput = document.getElementById('proxy-base')
 const overallBar = document.getElementById('overall-bar')
 const overallText = document.getElementById('overall-text')
 const statusFilter = document.getElementById('status-filter')
+const excelReqSpan = document.getElementById('excel-required')
+const dirReqSpan = document.getElementById('dir-required')
 
 // 全局状态：选择的根目录句柄、Excel解析后的行、UI任务引用
 let baseDirHandle = null
@@ -148,6 +154,7 @@ function renderTasks(){
     tasks[i] = { bar, status, loaded:0, total:0, state:'pending', tr }
   })
   updateOverall()
+  updateStartState()
 }
 
   // 创建（递归）子目录：支持 dir 为多级路径 a/b/c
@@ -221,6 +228,14 @@ function updateOverall(){
   if(overallBar) overallBar.style.width = pct + '%'
   if(overallText) overallText.textContent = `总进度 ${pct}% | 已完成 ${done}/${totalTasks} | 成功 ${success} 失败 ${error}`
   applyFilter()
+}
+
+function updateStartState(){
+  const hasFile = rows.length>0
+  const hasDir = !!baseDirHandle
+  startBtn.disabled = !(hasFile && hasDir)
+  if(excelReqSpan) excelReqSpan.style.display = hasFile ? 'none' : 'inline'
+  if(dirReqSpan) dirReqSpan.style.display = hasDir ? 'none' : 'inline'
 }
 
 function applyFilter(){
@@ -305,17 +320,21 @@ excelInput.addEventListener('change', async (e)=>{
   excelFileName = f.name
   rows = json.map(normalizeRow).filter(r=>r.url)
   renderTasks()
+  updateStartState()
 })
 
   // 事件：选择本地根目录（浏览器需支持File System Access API）
 pickDirBtn.addEventListener('click', async ()=>{
   baseDirHandle = await window.showDirectoryPicker()
+  updateStartState()
 })
 
   // 事件：开始下载 -> 禁用控件，运行并发队列，结束后恢复控件
 startBtn.addEventListener('click', async ()=>{
-  if(rows.length===0) return
-  if(!baseDirHandle) return
+  if(rows.length===0 || !baseDirHandle){
+    updateStartState()
+    return
+  }
   isDownloading = true
   document.getElementById('warn').style.display = 'block'
   beforeUnloadHandler = (e)=>{ e.preventDefault(); e.returnValue=''; }
