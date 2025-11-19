@@ -6,46 +6,92 @@
 <title>批量下载器</title>
 <!-- 页面样式：布局、表格、进度条 -->
 <style>
-body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial;max-width:980px;margin:24px auto;padding:0 16px;color:#111}
+body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial;margin:0;color:#0f172a;background:#f8fafc}
+.container{max-width:1000px;margin:32px auto;padding:0 20px}
+.page-header{display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:16px}
+.page-header h1{margin:0;font-size:28px;letter-spacing:.2px;color:#0b3d91}
+.page-header .sub{margin:6px 0 0;color:#64748b}
+
+.card{background:#fff;border:1px solid #e2e8f0;border-radius:12px;box-shadow:0 6px 16px rgba(15,23,42,.06);padding:16px;margin-top:16px}
 .row{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-bottom:12px}
-input[type="number"]{width:100px}
-button{padding:8px 12px;border:1px solid #ccc;border-radius:6px;background:#fff;cursor:pointer}
-button:disabled{opacity:.6;cursor:not-allowed}
-table{width:100%;border-collapse:collapse;margin-top:16px}
-th,td{border:1px solid #eee;padding:8px;text-align:left;font-size:14px}
-.progress{height:8px;background:#f2f2f2;border-radius:4px;overflow:hidden}
-.bar{height:100%;background:#4a90e2;width:0}
-.status{font-variant-numeric:tabular-nums}
-.hint{font-size:12px;color:#666}
-.warn{position:sticky;top:0;background:#ffeb3b;color:#000;border:1px solid #f0c000;padding:10px;font-weight:600;display:none;z-index:999;text-align:center}
+input[type="number"]{width:110px;height:36px;border:1px solid #cbd5e1;border-radius:8px;padding:0 10px}
+input[type="file"]{height:36px}
+
+.btn{padding:8px 14px;border-radius:8px;border:1px solid transparent;cursor:pointer;transition:all .2s ease;font-weight:600}
+.btn-primary{background:#2563eb;color:#fff}
+.btn-primary:hover{background:#1e4fcd}
+.btn-secondary{background:#f1f5f9;color:#0f172a;border:1px solid #e2e8f0}
+.btn-secondary:hover{background:#e2e8f0}
+.btn:disabled{opacity:.6;cursor:not-allowed}
+
+table{width:100%;border-collapse:separate;border-spacing:0}
+thead th{background:#f1f5f9;color:#0f172a;font-weight:700}
+th,td{border-bottom:1px solid #e2e8f0;padding:10px 12px;text-align:left;font-size:14px}
+tbody tr:hover{background:#f8fafc}
+tbody tr:first-child td{border-top:1px solid #e2e8f0}
+table{border:1px solid #e2e8f0;border-radius:12px;overflow:hidden}
+
+.progress{height:10px;background:#eef2ff;border-radius:999px;overflow:hidden}
+.bar{height:100%;background:linear-gradient(90deg,#60a5fa,#2563eb);width:0;transition:width .15s ease}
+.status{font-variant-numeric:tabular-nums;color:#334155}
+.hint{font-size:12px;color:#64748b;margin-top:8px}
+.warn{position:sticky;top:0;background:#fde047;color:#0f172a;border:1px solid #facc15;padding:10px;font-weight:700;display:none;z-index:999;text-align:center;border-radius:10px;box-shadow:0 4px 10px rgba(0,0,0,.08)}
 </style>
 </head>
 <body>
-<h1>批量下载器</h1>
-<!-- 顶部控制区：上传Excel、选择目标目录、设置并发数、开始下载 -->
-<div class="row">
-  <input id="excel-input" type="file" accept=".xlsx,.xls" />
-  <button id="pick-dir">选择目标目录</button>
-  <label>并发数 <input id="concurrency" type="number" min="1" max="16" value="4"></label>
-  <button id="start">开始下载</button>
+<div class="container">
+  <div class="page-header">
+    <div>
+      <h1>批量下载器</h1>
+      <p class="sub">按Excel批量下载文件并实时显示进度</p>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="row">
+      <input id="excel-input" type="file" accept=".xlsx,.xls" />
+      <button id="pick-dir" class="btn btn-secondary">选择目标目录</button>
+      <label>并发数 <input id="concurrency" type="number" min="1" max="16" value="4"></label>
+      <button id="start" class="btn btn-primary">开始下载</button>
+    </div>
+    <div class="hint">Excel需包含列名：dir、name、url</div>
+    <div id="warn" class="warn">下载进行中：请不要关闭或刷新此窗口，否则进度无法记录</div>
+    <div class="row" style="margin-top:8px">
+      <div style="flex:1">
+        <div id="overall-progress" class="progress"><div id="overall-bar" class="bar"></div></div>
+        <div id="overall-text" class="hint">总进度 0% | 已完成 0/0 | 成功 0 失败 0</div>
+      </div>
+    </div>
+  
+  </div>
+
+  <div class="card">
+    <div class="row" style="margin-bottom:8px">
+      <label>状态筛选
+        <select id="status-filter" style="height:36px;border:1px solid #cbd5e1;border-radius:8px;padding:0 10px">
+          <option value="all">全部</option>
+          <option value="pending">待开始</option>
+          <option value="in_progress">进行中</option>
+          <option value="success">完成</option>
+          <option value="error">失败</option>
+        </select>
+      </label>
+    </div>
+    <table>
+      <thead>
+        <tr>
+          <th>#</th>
+          <th>dir</th>
+          <th>name</th>
+          <th>url</th>
+          <th>进度</th>
+          <th>状态</th>
+        </tr>
+      </thead>
+      <tbody id="task-body"></tbody>
+    </table>
+  </div>
 </div>
-<!-- Excel表头要求提示 -->
-<div class="hint">Excel需包含列名：dir、name、url</div>
-<div id="warn" class="warn">下载进行中：请不要关闭或刷新此窗口，否则进度无法记录</div>
-<!-- 任务列表：每一行对应一个待下载任务 -->
-<table>
-  <thead>
-    <tr>
-      <th>#</th>
-      <th>dir</th>
-      <th>name</th>
-      <th>url</th>
-      <th>进度</th>
-      <th>状态</th>
-    </tr>
-  </thead>
-  <tbody id="task-body"></tbody>
-</table>
 <!-- 依赖：SheetJS（XLSX）用于解析Excel -->
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <script>
@@ -55,6 +101,9 @@ const pickDirBtn = document.getElementById('pick-dir')
 const startBtn = document.getElementById('start')
 const concurrencyInput = document.getElementById('concurrency')
 const tbody = document.getElementById('task-body')
+const overallBar = document.getElementById('overall-bar')
+const overallText = document.getElementById('overall-text')
+const statusFilter = document.getElementById('status-filter')
 
 // 全局状态：选择的根目录句柄、Excel解析后的行、UI任务引用
 let baseDirHandle = null
@@ -94,8 +143,9 @@ function renderTasks(){
     tr.appendChild(tdProgress)
     tr.appendChild(tdStatus)
     tbody.appendChild(tr)
-    tasks[i] = { bar, status, loaded:0, total:0 }
+    tasks[i] = { bar, status, loaded:0, total:0, state:'pending', tr }
   })
+  updateOverall()
 }
 
   // 创建（递归）子目录：支持 dir 为多级路径 a/b/c
@@ -157,6 +207,26 @@ function updateProgress(i, loaded, total){
   const pct = total>0 ? Math.round(loaded/total*100) : 0
   tasks[i].bar.style.width = pct + '%'
   tasks[i].status.textContent = total>0 ? `${pct}%` : `${(loaded/1024).toFixed(1)}KB`
+  updateOverall()
+}
+
+function updateOverall(){
+  const totalTasks = rows.length || 0
+  const success = tasks.filter(t=>t.state==='success').length
+  const error = tasks.filter(t=>t.state==='error').length
+  const done = success + error
+  const pct = Math.floor(done/Math.max(1,totalTasks)*100)
+  if(overallBar) overallBar.style.width = pct + '%'
+  if(overallText) overallText.textContent = `总进度 ${pct}% | 已完成 ${done}/${totalTasks} | 成功 ${success} 失败 ${error}`
+  applyFilter()
+}
+
+function applyFilter(){
+  if(!statusFilter) return
+  const v = statusFilter.value
+  tasks.forEach((t)=>{
+    t.tr.style.display = (v==='all' || t.state===v) ? '' : 'none'
+  })
 }
 
   // 执行单个下载任务：流式写入到本地目录（File System Access API）
@@ -165,6 +235,7 @@ async function downloadOne(i){
   if(!baseDirHandle) throw new Error('未选择目录')
   if(!row.dir || !row.name || !row.url) throw new Error('数据不完整')
   tasks[i].status.textContent = '进行中'
+  tasks[i].state = 'in_progress'
   const dirHandle = await ensureSubDir(row.dir)
   const response = await fetch(row.url, { mode: 'cors' })
   if(!response.ok) throw new Error(`HTTP ${response.status}`)
@@ -186,6 +257,8 @@ async function downloadOne(i){
   tasks[i].bar.style.background = '#2ecc71'
   tasks[i].status.textContent = '完成'
   rows[i].__result = 'success'
+  tasks[i].state = 'success'
+  updateOverall()
 }
 
   // 并发下载队列调度：限制同时进行的下载数（滑动窗口）
@@ -201,6 +274,8 @@ async function runQueue(limit){
           tasks[idx].bar.style.background = '#e74c3c'
           tasks[idx].status.textContent = String(e.message||e)
           rows[idx].__result = 'error: ' + String(e.message||e)
+          tasks[idx].state = 'error'
+          updateOverall()
         }).finally(()=>{
           executing.delete(p)
           if(executing.size===0 && cursor>=indices.length) resolve()
