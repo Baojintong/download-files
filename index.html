@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>批量下载器</title>
+<!-- 页面样式：布局、表格、进度条 -->
+<style>
+body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial;max-width:980px;margin:24px auto;padding:0 16px;color:#111}
+.row{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-bottom:12px}
+input[type="number"]{width:100px}
+button{padding:8px 12px;border:1px solid #ccc;border-radius:6px;background:#fff;cursor:pointer}
+button:disabled{opacity:.6;cursor:not-allowed}
+table{width:100%;border-collapse:collapse;margin-top:16px}
+th,td{border:1px solid #eee;padding:8px;text-align:left;font-size:14px}
+.progress{height:8px;background:#f2f2f2;border-radius:4px;overflow:hidden}
+.bar{height:100%;background:#4a90e2;width:0}
+.status{font-variant-numeric:tabular-nums}
+.hint{font-size:12px;color:#666}
+.warn{position:sticky;top:0;background:#ffeb3b;color:#000;border:1px solid #f0c000;padding:10px;font-weight:600;display:none;z-index:999;text-align:center}
+</style>
+</head>
+<body>
+<h1>批量下载器</h1>
+<!-- 顶部控制区：上传Excel、选择目标目录、设置并发数、开始下载 -->
+<div class="row">
+  <input id="excel-input" type="file" accept=".xlsx,.xls" />
+  <button id="pick-dir">选择目标目录</button>
+  <label>并发数 <input id="concurrency" type="number" min="1" max="16" value="4"></label>
+  <button id="start">开始下载</button>
+</div>
+<!-- Excel表头要求提示 -->
+<div class="hint">Excel需包含列名：dir、name、url</div>
+<div id="warn" class="warn">下载进行中：请不要关闭或刷新此窗口，否则进度无法记录</div>
+<!-- 任务列表：每一行对应一个待下载任务 -->
+<table>
+  <thead>
+    <tr>
+      <th>#</th>
+      <th>dir</th>
+      <th>name</th>
+      <th>url</th>
+      <th>进度</th>
+      <th>状态</th>
+    </tr>
+  </thead>
+  <tbody id="task-body"></tbody>
+</table>
+<!-- 依赖：SheetJS（XLSX）用于解析Excel -->
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<script>
+// 变量引用：获取页面元素
+const excelInput = document.getElementById('excel-input')
+const pickDirBtn = document.getElementById('pick-dir')
+const startBtn = document.getElementById('start')
+const concurrencyInput = document.getElementById('concurrency')
+const tbody = document.getElementById('task-body')
+
+// 全局状态：选择的根目录句柄、Excel解析后的行、UI任务引用
+let baseDirHandle = null
+let rows = []
+let tasks = []
+let excelHeaderRow = []
+let excelAOA = []
+let excelFileName = ''
+let isDownloading = false
+let beforeUnloadHandler = null
+
+// 规范化一行Excel数据为 {dir,name,url}
+function normalizeRow(obj){
+  const o = {}
+  Object.keys(obj).forEach(k=>{o[k.trim().toLowerCase()] = obj[k]})
+  return { dir: String(o.dir||'').trim(), name: String(o.name||'').trim(), url: String(o.url||'').trim() }
+}
+
+// 渲染任务表格行，并为每个任务准备进度条与状态文本
+function renderTasks(){
+  tbody.innerHTML = ''
+  rows.forEach((r,i)=>{
+    const tr = document.createElement('tr')
+    const progressWrap = document.createElement('div')
+    progressWrap.className = 'progress'
+    const bar = document.createElement('div')
+    bar.className = 'bar'
+    progressWrap.appendChild(bar)
+    const status = document.createElement('span')
+    status.className = 'status'
+    status.textContent = '待开始'
+    tr.innerHTML = `<td>${i+1}</td><td>${r.dir}</td><td>${r.name}</td><td>${r.url}</td>`
+    const tdProgress = document.createElement('td')
+    const tdStatus = document.createElement('td')
+    tdProgress.appendChild(progressWrap)
+    tdStatus.appendChild(status)
+    tr.appendChild(tdProgress)
+    tr.appendChild(tdStatus)
+    tbody.appendChild(tr)
+    tasks[i] = { bar, status, loaded:0, total:0 }
+  })
+}
+
+  // 创建（递归）子目录：支持 dir 为多级路径 a/b/c
+async function ensureSubDir(dirPath){
+  let handle = baseDirHandle
+  const parts = dirPath.split('/').filter(Boolean)
+  for(const p of parts){
+    handle = await handle.getDirectoryHandle(p, { create: true })
+  }
+  return handle
+}
+
+  // 根据响应的 Content-Type 推断缺省扩展名
+  function extFromType(t){
+    const m = String(t||'').toLowerCase()
+    if(m.includes('application/pdf')) return '.pdf'
+    if(m.includes('application/msword')) return '.doc'
+    if(m.includes('application/vnd.openxmlformats-officedocument.wordprocessingml.document')) return '.docx'
+    if(m.includes('image/heic')) return '.heic'
+    if(m.includes('image/heif')) return '.heic'
+    if(m.includes('image/jpeg')) return '.jpg'
+    if(m.includes('image/jpg')) return '.jpg'
+    if(m.includes('image/png')) return '.png'
+    if(m.includes('text/plain')) return '.txt'
+    if(m.includes('text/html')) return '.html'
+    if(m.includes('application/zip')) return '.zip'
+    return ''
+  }
+
+  function parseContentDisposition(v){
+    if(!v) return null
+    const m = /filename\*=UTF-8''([^;]+)|filename="?([^";]+)"?/i.exec(v)
+    const raw = m ? (m[1]||m[2]) : null
+    if(!raw) return null
+    try { return decodeURIComponent(raw) } catch { return raw }
+  }
+
+  function chooseFileName(row, response){
+    let name = String(row.name||'').trim()
+    const hasExt = /\.[a-z0-9]+$/i.test(name)
+    if(hasExt) return name
+    const cd = response.headers.get('content-disposition')
+    const cdName = parseContentDisposition(cd)
+    if(cdName && /\.[a-z0-9]+$/i.test(cdName)) return cdName
+    try {
+      const u = new URL(row.url)
+      const p = u.pathname
+      const m = p.match(/\.[a-z0-9]+$/i)
+      if(m) return name ? name + m[0] : p.split('/').pop()
+    } catch {}
+    const ext = extFromType(response.headers.get('content-type'))
+    return name ? name + ext : ('file' + ext)
+  }
+
+  // 更新某一任务的可视化进度
+function updateProgress(i, loaded, total){
+  tasks[i].loaded = loaded
+  tasks[i].total = total
+  const pct = total>0 ? Math.round(loaded/total*100) : 0
+  tasks[i].bar.style.width = pct + '%'
+  tasks[i].status.textContent = total>0 ? `${pct}%` : `${(loaded/1024).toFixed(1)}KB`
+}
+
+  // 执行单个下载任务：流式写入到本地目录（File System Access API）
+async function downloadOne(i){
+  const row = rows[i]
+  if(!baseDirHandle) throw new Error('未选择目录')
+  if(!row.dir || !row.name || !row.url) throw new Error('数据不完整')
+  tasks[i].status.textContent = '进行中'
+  const dirHandle = await ensureSubDir(row.dir)
+  const response = await fetch(row.url, { mode: 'cors' })
+  if(!response.ok) throw new Error(`HTTP ${response.status}`)
+  const total = parseInt(response.headers.get('content-length')||'0',10)
+  tasks[i].total = total
+  const fileName = chooseFileName(row, response)
+  const fileHandle = await dirHandle.getFileHandle(fileName, { create: true })
+  const writable = await fileHandle.createWritable()
+  const reader = response.body.getReader()
+  let loaded = 0
+  for(;;){
+    const {done, value} = await reader.read()
+    if(done) break
+    loaded += value.byteLength
+    updateProgress(i, loaded, total)
+    await writable.write(value)
+  }
+  await writable.close()
+  tasks[i].bar.style.background = '#2ecc71'
+  tasks[i].status.textContent = '完成'
+  rows[i].__result = 'success'
+}
+
+  // 并发下载队列调度：限制同时进行的下载数（滑动窗口）
+async function runQueue(limit){
+  const indices = rows.map((_,i)=>i)
+  const executing = new Set()
+  let cursor = 0
+  return new Promise((resolve)=>{
+    const launchNext = () => {
+      while(executing.size < limit && cursor < indices.length){
+        const idx = indices[cursor++]
+        const p = downloadOne(idx).catch(e=>{
+          tasks[idx].bar.style.background = '#e74c3c'
+          tasks[idx].status.textContent = String(e.message||e)
+          rows[idx].__result = 'error: ' + String(e.message||e)
+        }).finally(()=>{
+          executing.delete(p)
+          if(executing.size===0 && cursor>=indices.length) resolve()
+          else launchNext()
+        })
+        executing.add(p)
+      }
+    }
+    launchNext()
+  })
+}
+
+  // 事件：Excel文件选择 -> 解析首个工作表为 JSON
+excelInput.addEventListener('change', async (e)=>{
+  const f = e.target.files[0]
+  if(!f) return
+  const data = await f.arrayBuffer()
+  const wb = XLSX.read(data)
+  const sheet = wb.Sheets[wb.SheetNames[0]]
+  const json = XLSX.utils.sheet_to_json(sheet, { defval: '' })
+  excelAOA = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '' })
+  excelHeaderRow = (excelAOA[0]||[]).map(v=>String(v))
+  excelFileName = f.name
+  rows = json.map(normalizeRow).filter(r=>r.url)
+  renderTasks()
+})
+
+  // 事件：选择本地根目录（浏览器需支持File System Access API）
+pickDirBtn.addEventListener('click', async ()=>{
+  baseDirHandle = await window.showDirectoryPicker()
+})
+
+  // 事件：开始下载 -> 禁用控件，运行并发队列，结束后恢复控件
+startBtn.addEventListener('click', async ()=>{
+  if(rows.length===0) return
+  if(!baseDirHandle) return
+  isDownloading = true
+  document.getElementById('warn').style.display = 'block'
+  beforeUnloadHandler = (e)=>{ e.preventDefault(); e.returnValue=''; }
+  window.addEventListener('beforeunload', beforeUnloadHandler)
+  startBtn.disabled = true
+  pickDirBtn.disabled = true
+  excelInput.disabled = true
+  concurrencyInput.disabled = true
+  const limit = Math.max(1, Math.min(16, parseInt(concurrencyInput.value||'4',10)))
+  await runQueue(limit)
+  await saveResultExcel()
+  isDownloading = false
+  document.getElementById('warn').style.display = 'none'
+  if(beforeUnloadHandler){ window.removeEventListener('beforeunload', beforeUnloadHandler); beforeUnloadHandler = null }
+  startBtn.disabled = false
+  pickDirBtn.disabled = false
+  excelInput.disabled = false
+  concurrencyInput.disabled = false
+})
+
+async function saveResultExcel(){
+  if(!excelAOA.length) return
+  const header = excelHeaderRow.slice()
+  const headerNorm = header.map(h=>String(h).trim().toLowerCase())
+  if(!headerNorm.includes('result')) header.push('result')
+  const outAOA = [header]
+  for(let i=1;i<excelAOA.length;i++){
+    const rowArr = (excelAOA[i]||[]).slice()
+    const res = rows[i-1] && rows[i-1].__result ? rows[i-1].__result : ''
+    rowArr.push(res)
+    outAOA.push(rowArr)
+  }
+  const ws = XLSX.utils.aoa_to_sheet(outAOA)
+  const wb = XLSX.utils.book_new()
+  XLSX.utils.book_append_sheet(wb, ws, 'Sheet1')
+  const buf = XLSX.write(wb, { bookType: 'xlsx', type: 'array' })
+  const outName = (excelFileName || 'tasks').replace(/\.xlsx?$/i,'') + '-result.xlsx'
+  try{
+    if(baseDirHandle){
+      const fh = await baseDirHandle.getFileHandle(outName, { create: true })
+      const w = await fh.createWritable()
+      await w.write(buf)
+      await w.close()
+    } else {
+      XLSX.writeFile(wb, outName)
+    }
+  }catch{
+    XLSX.writeFile(wb, outName)
+  }
+}
+</script>
+</body>
+</html>
